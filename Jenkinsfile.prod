@@ -1,0 +1,91 @@
+pipeline {
+    agent { node { label 'docker' } }
+
+    environment {
+        imgName = 'docker-repo:5000/spitch/analytics-doc-server'
+        buildContainer = 'node'
+        dockerRegistry = 'http://docker-repo:5000'
+        containerName = 'analytics-doc-server'
+    }
+
+    stages {
+        stage('Init') {
+            steps {
+                echo "Params release tag ${release_tag}, push to spitch ${push_to_spitch}, push to bss ${push_to_bss}"
+            }
+        }
+        stage('Git checkout') {
+            steps {
+                echo 'Pulling data from GIT'
+                git(url: 'https://bitbucket.org/lingware/ib-doc-server.git', credentialsId: '91b28429-f0fb-494f-9714-d07669e332f8', branch: "${build_branch}")
+                sh(returnStdout: false, script: "git tag ${release_tag}b${BUILD_NUMBER} ${build_branch}")
+                sh(returnStdout: false, script: "echo 'build_tag=\"b${BUILD_NUMBER}\"\nrelease_tag=\"${release_tag}\"\nbuild_time=\"${BUILD_TIMESTAMP}\"\nimage_tag=\"${release_tag}b${BUILD_NUMBER}\"\n' >src/assembly_info.py")
+                withCredentials([usernamePassword(credentialsId: '91b28429-f0fb-494f-9714-d07669e332f8', passwordVariable: 'GIT_PASSWORD', usernameVariable: 'GIT_USERNAME')]) {
+                    sh(returnStdout: false, script: "git push https://${GIT_USERNAME}:${GIT_PASSWORD}@bitbucket.org/lingware/ib-doc-server.git --tags")
+                }
+            }
+        }
+
+        stage('Compile Doc') {
+            steps {
+                withDockerContainer(buildContainer) {
+                    dir('ib-docs') {
+                        echo 'Pulling ib-docs'
+                        git(url: 'https://github.com/SpitchLingware/speech-anaylitcs-docs.git', credentialsId: 'github_alex_token', branch: "development")
+                    }
+                }
+            }
+        }
+
+        stage('Build image') {
+            steps {
+                echo "Scripted image build"
+                script {
+                    def image = docker.build("${imgName}:${release_tag}b${BUILD_NUMBER}", "-f Dockerfile.prod .")
+                    docker.withRegistry(dockerRegistry) {
+                        image.push("${release_tag}b${BUILD_NUMBER}")
+                        image.push("prod")
+                    }
+                }
+            }
+        }
+
+        stage('Push to the bss repo') {
+            when { equals expected: "true", actual: push_to_bss }
+            steps {
+                sh 'docker tag ${imgName}:${release_tag}b${BUILD_NUMBER} ${bss_repo_name}/${containerName}:${release_tag}b${BUILD_NUMBER}'
+                sh 'docker tag ${imgName}:${release_tag}b${BUILD_NUMBER} ${bss_repo_name}/${containerName}:${release_tag}'
+                sh 'docker push ${bss_repo_name}/${containerName}:${release_tag}b${BUILD_NUMBER}'
+                sh 'docker push ${bss_repo_name}/${containerName}:${release_tag}'
+            }
+        }
+
+        stage('Push to the spitch repo') {
+            when { equals expected: "true", actual: push_to_spitch }
+            steps {
+                 withDockerRegistry([ credentialsId: "jenkins_sa", url: "${dockerhub_url}" ]) {
+                    sh 'docker tag ${imgName}:${release_tag}b${BUILD_NUMBER} ${spitch_repo_name}/${containerName}:${release_tag}b${BUILD_NUMBER}'
+                    sh 'docker tag ${imgName}:${release_tag}b${BUILD_NUMBER} ${spitch_repo_name}/${containerName}:${release_tag}'
+                    sh 'docker tag ${imgName}:${release_tag}b${BUILD_NUMBER} ${spitch_repo_name}/${containerName}:latest'
+                    sh 'docker push ${spitch_repo_name}/${containerName}:${release_tag}b${BUILD_NUMBER}'
+                    sh 'docker push ${spitch_repo_name}/${containerName}:${release_tag}'
+                    sh 'docker push ${spitch_repo_name}/${containerName}:latest'
+                }
+            }
+        }
+
+    }
+
+    post {
+        always {
+            echo "Done"
+        }
+        success {
+            echo "Success"
+        }
+        failure {
+            echo "Oops. Something went wrong"
+        }
+    }
+
+}
